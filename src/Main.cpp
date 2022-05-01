@@ -23,7 +23,7 @@ glm::vec3 viewForward{ 1.0f, 0.0f, 0.0f };
 glm::vec3 viewRight{ 0.0f, -1.0f, 0.0f };
 glm::vec3 viewUp{ 0.0f, 0.0f, 1.0f };
 
-float viewSpeed = 30.0f;
+constexpr float viewSpeed = 100.0f;
 
 glm::mat4 projMatrix;
 glm::mat4 viewMatrix;
@@ -172,7 +172,8 @@ struct UserCommands
 		Quit = 1,
 		SpeedModifier = 2,
 		LeftMouseButton = 4,
-		RightMouseButton = 8
+		RightMouseButton = 8,
+		Reload = 16
 	};
 
 	int flags{ 0 };
@@ -238,6 +239,10 @@ UserCommands GenerateUserCommands()
 	if ( states[SDL_SCANCODE_LSHIFT] )
 	{
 		uc.flags |= UserCommands::SpeedModifier;
+	}
+	if ( states[SDL_SCANCODE_R] )
+	{
+		uc.flags |= UserCommands::Reload;
 	}
 
 	int x, y;
@@ -369,6 +374,346 @@ void TestPolygonIntersection( const float& time )
 	}
 }
 
+namespace Map
+{
+	struct MapFace
+	{
+		adm::Plane plane;
+		adm::Vec3 planeVerts[3];
+		bool noDraw{ false };
+
+		adm::Vec3 GetOrigin() const
+		{
+			return (planeVerts[0] + planeVerts[1] + planeVerts[2]) / 3.0f;
+		}
+	};
+
+	std::vector<std::vector<MapFace>> Brushes;
+	std::vector<adm::Polygon> Polygons;
+	bool valveMapFormat = false;
+
+	namespace Parsing
+	{
+		std::optional<std::array<float, 4U>> ParseBrushSideTexCoord( adm::Lexer& lex, adm::String& token )
+		{
+			std::array<float, 4U> texCoords;
+
+			if ( !lex.Expect( "[" ) )
+			{
+				std::cout << "Expected a [, got a: " << lex.Next() << std::endl;
+				token = "}";
+				return {};
+			}
+			token = lex.Next();
+
+			token = lex.Next();
+			texCoords[0] = std::stof( token );
+			token = lex.Next();
+			texCoords[1] = std::stof( token );
+			token = lex.Next();
+			texCoords[2] = std::stof( token );
+			token = lex.Next();
+			texCoords[3] = std::stof( token );
+
+			if ( !lex.Expect( "]" ) )
+			{
+				std::cout << "Expected a ], got a: " << lex.Next() << std::endl;
+				token = "}";
+				return {};
+			}
+			token = lex.Next();
+
+			return texCoords;
+		}
+
+		// ( x y z )
+		std::optional<adm::Vec3> ParseBrushSidePoint( adm::Lexer& lex, adm::String& token )
+		{
+			adm::Vec3 point;
+
+			if ( !lex.Expect( "(" ) )
+			{
+				std::cout << "Expected a (, got a: " << lex.Next() << std::endl;
+				token = "}";
+				return {};
+			}
+			token = lex.Next();
+
+			token = lex.Next();
+			point.x = std::stof( token );
+			token = lex.Next();
+			point.y = std::stof( token );
+			token = lex.Next();
+			point.z = std::stof( token );
+
+			if ( !lex.Expect( ")" ) )
+			{
+				std::cout << "Expected a ), got a: " << lex.Next() << std::endl;
+				token = "}";
+				return {};
+			}
+			token = lex.Next();
+
+			return point;
+		}
+
+		// ( -68 76 -44 ) ( -68 0 52 ) ( -68 -64 52 ) __TB_empty [ 0 -1 0 0 ] [ 0 0 -1 0 ] 0 1 1
+		// ( x1 y1 z1 ) ( x2 y2 z2 ) ( x3 y3 z3 ) texture_name [ ux uy uz offsetX ] [ vx vy vz offsetY ] rotation scaleX scaleY
+		// Right now it only parses the plane (x1...z3) and generates polygones from dat
+		void ParseBrushSide( adm::Lexer& lex, adm::String& token, std::vector<MapFace>& brush )
+		{
+			// We're done, the whole brush is parsed
+			if ( lex.Expect( "}" ) )
+			{
+				token = lex.Next();
+				return;
+			}
+
+			std::optional<adm::Vec3> points[3]
+			{
+				ParseBrushSidePoint( lex, token ),
+				ParseBrushSidePoint( lex, token ),
+				ParseBrushSidePoint( lex, token )
+			};
+
+			for ( const auto& p : points )
+			{
+				if ( !p.has_value() )
+				{
+					std::cout << "Failed to parse at least one of the verts" << std::endl;
+					return;
+				}
+			}
+
+			// texture_name
+			token = lex.Next();
+			if ( token.empty() )
+			{
+				std::cout << "Could not parse texture name" << std::endl;
+				return;
+			}
+
+			adm::String textureName = token;
+
+			// Texture coordinates
+			if ( !ParseBrushSideTexCoord( lex, token ).has_value() )
+			{
+				std::cout << "Failed to parse the U texcoord" << std::endl;
+				return;
+			}
+			if ( !ParseBrushSideTexCoord( lex, token ).has_value() )
+			{
+				std::cout << "Failed to parse the V texcoord" << std::endl;
+				return;
+			}
+
+			// rotation
+			token = lex.Next();
+			if ( token.empty() )
+			{
+				std::cout << "Could not parse rotation" << std::endl;
+				return;
+			}
+
+			// scaleX
+			token = lex.Next();
+			if ( token.empty() )
+			{
+				std::cout << "Could not parse scaleX" << std::endl;
+				return;
+			}
+
+			// scaleY
+			token = lex.Next();
+			if ( token.empty() )
+			{
+				std::cout << "Could not parse scaleY" << std::endl;
+				return;
+			}
+
+			brush.push_back(
+				{
+					adm::Plane( points[0].value(), points[1].value(), points[2].value() ),
+					{ points[0].value(), points[1].value(), points[2].value() },
+					textureName == "SKIP" || textureName == "SKY1" || textureName == "*04MWATS"
+				} );
+		}
+
+		// We have just entered a { block for brushes
+		void ParseBrush( adm::Lexer& lex, adm::String& token )
+		{
+			// Bail out
+			if ( token == "}" )
+			{
+				return;
+			}
+
+			std::vector<MapFace> brush;
+			brush.reserve( 6U );
+
+			while ( token != "}" )
+			{
+				ParseBrushSide( lex, token, brush );
+			}
+
+			// There cannot be a brush with fewer than 4 faces (tetrahedron)
+			if ( brush.size() >= 4 )
+			{
+				Brushes.push_back( std::move( brush ) );
+			}
+			else
+			{
+				std::cout << "Invalid brush" << std::endl;
+			}
+
+			// Expect a }
+			if ( token != "}" )
+			{
+				std::cout << "Brush does not have an ending }" << std::endl;
+				token = "}";
+				return;
+			}
+		}
+
+		void ParseEntity( adm::Lexer& lex, adm::String& token )
+		{
+			adm::Dictionary entityProperties;
+
+			while ( !lex.IsEndOfFile() )
+			{
+				token = lex.Next();
+
+				// The entity is done, bail out
+				if ( token == "}" )
+				{
+					break;
+				}
+
+				// Keyvalues are stored first
+				if ( token != "{" )
+				{
+					entityProperties.SetString( token.c_str(), lex.Next() );
+				}
+				// Then brushes
+				else
+				{
+					if ( entityProperties["classname"] == "worldspawn" )
+					{
+						const int mapVersion = entityProperties.GetInteger( "mapversion" );
+						if ( mapVersion == 220 )
+						{
+							valveMapFormat = true;
+						}
+						else if ( mapVersion == 0 )
+						{
+							valveMapFormat = false;
+							std::cout << "Only Valve220 map format is supported" << std::endl;
+							token = "}";
+							return;
+						}
+						else
+						{
+							std::cout << "Unsupported map format: " << mapVersion << std::endl;
+							token = "}";
+							return;
+						}
+					}
+
+					ParseBrush( lex, token );
+				}
+			}
+		}
+	}
+
+	void ProcessBrushes()
+	{
+		for ( const auto& brush : Brushes )
+		{
+			// Sides of a brush
+			for ( const auto& brushSide : brush )
+			{
+				// The polygon which will get intersected
+				adm::Polygon polygon = adm::Polygon( brushSide.plane, 2048.0f );
+				if ( brushSide.noDraw )
+				{
+					continue;
+				}
+
+				// Polygons that are very large will have pretty imprecise coordinates
+				// after splitting, so here we're basically moving a smaller polygon into place,
+				// to retain that precision
+				const adm::Vec3 planeOrigin = brushSide.GetOrigin();
+				const adm::Vec3 polygonOrigin = polygon.GetOrigin();
+				const adm::Vec3 difference = planeOrigin - polygonOrigin;
+
+				// Todo: Polygon::Shift method
+				for ( auto& v : polygon.vertices )
+				{
+					v += difference;
+				}
+
+				// The planes that intersect the polygon
+				for ( const auto& intersector : brush )
+				{
+					// Hackety hack til we get a == operator for adm::Plane
+					if ( &brushSide == &intersector )
+					{
+						continue;
+					}
+
+					auto result = polygon.Split( intersector.plane );
+					if ( result.didIntersect && result.back.has_value() )
+					{
+						// Modify the polygon we started off from
+						polygon = result.back.value();
+					}
+				}
+
+				Polygons.push_back( std::move( polygon ) );
+			}
+		}
+	}
+
+	void Load()
+	{
+		Polygons.clear();
+
+		std::ifstream mapFile( "test.map" );
+		if ( !mapFile ) 
+		{
+			std::cout << "WARNING: cannot find test.map" << std::endl;
+			return;
+		}
+
+		adm::Lexer lex( mapFile );
+		lex.SetDelimiters( adm::Lexer::DelimitersSimple );
+
+		// Reserving 128 characters so we don't reallocate stuff often
+		adm::String token;
+		token.reserve( 128U );
+
+		// Idea: Lexer to bool operator, so we can just do while ( lex )
+		do
+		{
+			token = lex.Next();
+			if ( token == "{" )
+			{
+				Parsing::ParseEntity( lex, token );
+			}
+			else if ( token.empty() )
+			{
+				break;
+			}
+			else
+			{
+				std::cout << "Unknown token: " << token << std::endl;
+			}
+		} while ( !lex.IsEndOfFile() );
+
+		ProcessBrushes();
+	}
+}
+
 void RunFrame( const float& deltaTime, const UserCommands& uc )
 {
 	static float time = 0.0f;
@@ -385,20 +730,24 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		viewAngles.x = -89.9f;
 
 	// Offset the view position
-	viewOrigin += uc.forward * viewForward * deltaTime * viewSpeed;
-	viewOrigin += uc.right * viewRight * deltaTime * viewSpeed;
-	viewOrigin += uc.up * viewUp * deltaTime * viewSpeed;
+	const float adjustedViewSpeed = viewSpeed * ((uc.flags & UserCommands::SpeedModifier) ? 1.5f : 1.0f);
+
+	viewOrigin += uc.forward * viewForward * deltaTime * adjustedViewSpeed;
+	viewOrigin += uc.right * viewRight * deltaTime * adjustedViewSpeed;
+	viewOrigin += uc.up * viewUp * deltaTime * adjustedViewSpeed;
 	
 	SetupMatrices();
 
 	// Clear the view
 	SDL_SetRenderDrawColor( renderer, 0, 0, 0, 255 );
 	SDL_RenderClear( renderer );
+	SDL_SetRenderDrawColor( renderer, 255, 255, 255, 255 );
 	
 	// Draw some polygons
-	SDL_SetRenderDrawColor( renderer, 255, 255, 255, 255 );
-
-	TestPolygonIntersection( time );
+	for ( const auto& p : Map::Polygons )
+	{
+		DrawPolygon( p );
+	}
 
 	// Crosshair
 	//if ( false )
@@ -453,6 +802,8 @@ int main( int argc, char** argv )
 	window = SDL_CreateWindow( "SoftRenda", CENTER, CENTER, windowWidth, windowHeight, SDL_WINDOW_RESIZABLE );
 	renderer = SDL_CreateRenderer( window, 0, SDL_RENDERER_SOFTWARE );
 	SDL_SetRelativeMouseMode( SDL_TRUE );
+
+	Map::Load();
 
 	float deltaTime = 0.016f;
 	while ( true )
