@@ -1,5 +1,6 @@
 
 #include <iostream>
+#include <thread>
 #include <chrono>
 using namespace std::chrono;
 
@@ -17,7 +18,7 @@ SDL_Renderer* renderer = nullptr;
 float windowWidth = 1024.0f;
 float windowHeight = 1024.0f;
 
-glm::vec3 viewOrigin{ -80.0f, -10.0f, 40.0f };
+glm::vec3 viewOrigin{ -30.0f, -10.0f, 10.0f };
 glm::vec3 viewAngles{ 0.0f, 0.0f, 0.0f };
 glm::vec3 viewForward{ 1.0f, 0.0f, 0.0f };
 glm::vec3 viewRight{ 0.0f, -1.0f, 0.0f };
@@ -314,59 +315,385 @@ inline glm::vec3 randVec()
 	return glm::vec3( crandom(), crandom(), crandom() ) * crandom() * 15.0f;
 }
 
-void TestPolygonIntersection( const float& time )
-{
-	using namespace adm;
+// The Jolt headers don't include Jolt.h. Always include Jolt.h before including any other Jolt header.
+// You can use Jolt.h in your precompiled header to speed up compilation.
+#include <Jolt/Jolt.h>
 
-	static Plane planes[] =
+// Jolt includes
+#include <Jolt/RegisterTypes.h>
+#include <Jolt/Core/TempAllocator.h>
+#include <Jolt/Core/JobSystemThreadPool.h>
+#include <Jolt/Physics/PhysicsSettings.h>
+#include <Jolt/Physics/PhysicsSystem.h>
+#include <Jolt/Physics/Collision/Shape/BoxShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
+#include <Jolt/Physics/Body/BodyCreationSettings.h>
+#include <Jolt/Physics/Body/BodyActivationListener.h>
+
+namespace phys
+{
+	JPH_SUPPRESS_WARNINGS;
+
+	using namespace JPH;
+	
+	// Layer that objects can be in, determines which other objects it can collide with
+	// Typically you at least want to have 1 layer for moving bodies and 1 layer for static bodies, but you can have more
+	// layers if you want. E.g. you could have a layer for high detail collision (which is not used by the physics simulation
+	// but only if you do collision testing).
+	namespace Layers
 	{
-		Plane( Vec3( 20.0f, 40.0f, 100.0f ).Normalized(), 2.0f),
-		Plane( Vec3::Right, 12.0f ),
-		Plane( -Vec3::Right, 6.0f ),
-		Plane( -Vec3::Up, 1.0f ),
-		Plane( Vec3::Forward, 10.0f ),
-		Plane( -Vec3::Forward, 9.0f )
+		static constexpr uint8_t NON_MOVING = 0;
+		static constexpr uint8_t MOVING = 1;
+		static constexpr uint8_t NUM_LAYERS = 2;
 	};
 
-	planes[0].SetNormal( (Vec3::Up * 4.0f + Vec3( std::sin(time), std::cos(time * 0.4f), 0.0f) ).Normalized() );
-	planes[1].SetNormal( (Vec3::Right * 12.0f + Vec3( std::sin(time * 2.0f), std::cos(time * 0.87f), 0.0f) ).Normalized() );
-
-	// Blue-ish for the planes
-	//SDL_SetRenderDrawColor( renderer, 100, 100, 255, 255 );
-	Polygon polygons[std::size( planes )];
-	for ( size_t i = 0U; i < std::size( planes ); i++ )
+	// Function that determines if two object layers can collide
+	static bool MyObjectCanCollide( ObjectLayer inObject1, ObjectLayer inObject2 )
 	{
-		polygons[i] = Polygon(planes[i], 20.0f);
-		DrawPolygon( polygons[i] );
+		switch ( inObject1 )
+		{
+		case Layers::NON_MOVING:
+			return inObject2 == Layers::MOVING; // Non moving only collides with moving
+		case Layers::MOVING:
+			return true; // Moving collides with everything
+		default:
+			JPH_ASSERT( false );
+			return false;
+		}
+	};
+
+	// Each broadphase layer results in a separate bounding volume tree in the broad phase. You at least want to have
+	// a layer for non-moving and moving objects to avoid having to update a tree full of static objects every frame.
+	// You can have a 1-on-1 mapping between object layers and broadphase layers (like in this case) but if you have
+	// many object layers you'll be creating many broad phase trees, which is not efficient. If you want to fine tune
+	// your broadphase layers define JPH_TRACK_BROADPHASE_STATS and look at the stats reported on the TTY.
+	namespace BroadPhaseLayers
+	{
+		static constexpr BroadPhaseLayer NON_MOVING( 0 );
+		static constexpr BroadPhaseLayer MOVING( 1 );
+		static constexpr uint NUM_LAYERS( 2 );
+	};
+
+	// BroadPhaseLayerInterface implementation
+	// This defines a mapping between object and broadphase layers.
+	class BPLayerInterfaceImpl final : public BroadPhaseLayerInterface
+	{
+	public:
+		BPLayerInterfaceImpl()
+		{
+			// Create a mapping table from object to broad phase layer
+			mObjectToBroadPhase[Layers::NON_MOVING] = BroadPhaseLayers::NON_MOVING;
+			mObjectToBroadPhase[Layers::MOVING] = BroadPhaseLayers::MOVING;
+		}
+
+		virtual uint					GetNumBroadPhaseLayers() const override
+		{
+			return BroadPhaseLayers::NUM_LAYERS;
+		}
+
+		virtual BroadPhaseLayer			GetBroadPhaseLayer( ObjectLayer inLayer ) const override
+		{
+			JPH_ASSERT( inLayer < Layers::NUM_LAYERS );
+			return mObjectToBroadPhase[inLayer];
+		}
+
+#if defined(JPH_EXTERNAL_PROFILE) || defined(JPH_PROFILE_ENABLED)
+		virtual const char* GetBroadPhaseLayerName( BroadPhaseLayer inLayer ) const override
+		{
+			switch ( (BroadPhaseLayer::Type)inLayer )
+			{
+			case (BroadPhaseLayer::Type)BroadPhaseLayers::NON_MOVING:	return "NON_MOVING";
+			case (BroadPhaseLayer::Type)BroadPhaseLayers::MOVING:		return "MOVING";
+			default:													JPH_ASSERT( false ); return "INVALID";
+			}
+		}
+#endif // JPH_EXTERNAL_PROFILE || JPH_PROFILE_ENABLED
+
+	private:
+		BroadPhaseLayer					mObjectToBroadPhase[Layers::NUM_LAYERS];
+	};
+
+	// Function that determines if two broadphase layers can collide
+	static bool MyBroadPhaseCanCollide( ObjectLayer inLayer1, BroadPhaseLayer inLayer2 )
+	{
+		switch ( inLayer1 )
+		{
+		case Layers::NON_MOVING:
+			return inLayer2 == BroadPhaseLayers::MOVING;
+		case Layers::MOVING:
+			return true;
+		default:
+			JPH_ASSERT( false );
+			return false;
+		}
 	}
 
-	// For every huge polygon generated from the planes
-	for ( int i = 0; i < std::size( polygons ); i++ )
+	adm::Vec3 PhysToAdm( const JPH::Float3& v )
 	{
-		// Clip against every other plane and modify the polygon
-		for ( int j = 0; j < std::size( planes ); j++ )
-		{
-			// No need to clip against the same plane
-			if ( i == j )
-			{
-				continue;
-			}
+		return &v.x;
+	}
 
-			auto result = polygons[i].Split( planes[j] );
-			if ( result.didIntersect && result.back.has_value() )
+	adm::Vec3 PhysToAdm( const JPH::Vec3& v )
+	{
+		return { v.GetX(), v.GetY(), v.GetZ() };
+	}
+
+	class PhysicsDebugMesh final : public RefTargetVirtual, RefTarget<PhysicsDebugMesh>
+	{
+	public:
+		PhysicsDebugMesh( const DebugRenderer::Triangle* triangles, int triangleCount )
+		{
+			for ( int i = 0; i < triangleCount; i++ )
 			{
-				// Modify the polygon we started off from
-				polygons[i] = result.back.value();
-				// Red for the intersecting polygons
-				SDL_SetRenderDrawColor( renderer, 255, 0, 0, 255 );
-				DrawPolygon( polygons[i] );
+				verts.push_back( triangles[i].mV[0] );
+				verts.push_back( triangles[i].mV[1] );
+				verts.push_back( triangles[i].mV[2] );
 			}
 		}
 
-		// Orange for the final polygons
-		SDL_SetRenderDrawColor( renderer, 255, 192, 64, 255 );
-		DrawPolygon( polygons[i], true );
-	}
+		PhysicsDebugMesh( const DebugRenderer::Vertex* vertices, int vertexCount, const uint32* indices, int indexCount )
+		{
+			for ( int i = 0; i < indexCount; i++ )
+			{
+				verts.push_back( vertices[indices[i]] );
+			}
+		}
+
+		void AddRef() override
+		{
+			RefTarget<PhysicsDebugMesh>::AddRef();
+		}
+		
+		void Release() override
+		{
+			if ( --mRefCount == 0 )
+			{
+				delete this;
+			}
+		}
+
+		std::vector<DebugRenderer::Vertex> verts;
+	};
+
+	// Debug rendera
+	class PhysicsDebugRenderer final : public DebugRenderer
+	{
+	public:
+		PhysicsDebugRenderer()
+		{
+			DebugRenderer::Initialize();
+		}
+
+		void DrawLine( const Float3& inFrom, const Float3& inTo, ColorArg inColor ) override
+		{
+			SDL_SetRenderDrawColor( renderer, inColor.r, inColor.g, inColor.b, inColor.a );
+			DrawLine3D( &inFrom.x, &inTo.x );
+		}
+
+		void DrawLine( const Vec4& inFrom, const Vec4& inTo, ColorArg color )
+		{
+			Float3 from{ inFrom.GetX(), inFrom.GetY(), inFrom.GetZ() };
+			Float3 to{ inTo.GetX(), inTo.GetY(), inTo.GetZ() };
+
+			return DrawLine( from, to, color );
+		}
+
+		void DrawTriangle( Vec3Arg inV1, Vec3Arg inV2, Vec3Arg inV3, ColorArg inColor ) override
+		{
+			SDL_SetRenderDrawColor( renderer, inColor.r, inColor.g, inColor.b, inColor.a );
+			DrawLine3D( PhysToAdm( inV1 ), PhysToAdm( inV2 ) );
+			DrawLine3D( PhysToAdm( inV2 ), PhysToAdm( inV3 ) );
+			DrawLine3D( PhysToAdm( inV3 ), PhysToAdm( inV1 ) );
+		}
+
+		Batch CreateTriangleBatch( const Triangle* inTriangles, int inTriangleCount ) override
+		{
+			return new PhysicsDebugMesh( inTriangles, inTriangleCount );
+		}
+
+		Batch CreateTriangleBatch( const Vertex* inVertices, int inVertexCount, const uint32* inIndices, int inIndexCount ) override
+		{
+			return new PhysicsDebugMesh( inVertices, inVertexCount, inIndices, inIndexCount );
+		}
+
+		void DrawGeometry( 
+			Mat44Arg inModelMatrix, 
+			const AABox& inWorldSpaceBounds, 
+			float inLODScaleSq, 
+			ColorArg inModelColor, 
+			const GeometryRef& inGeometry, 
+			ECullMode inCullMode = ECullMode::CullBackFace, 
+			ECastShadow inCastShadow = ECastShadow::On, 
+			EDrawMode inDrawMode = EDrawMode::Solid ) override
+		{
+			SDL_SetRenderDrawColor( renderer, inModelColor.r, inModelColor.g, inModelColor.b, inModelColor.a );
+
+			// Because yes
+			PhysicsDebugMesh* m = static_cast<PhysicsDebugMesh*>( inGeometry.GetPtr()->mLODs[0].mTriangleBatch.GetPtr() );
+			
+			for ( int i = 0; i < m->verts.size(); i += 3 )
+			{
+				const auto& v = m->verts;
+				JPH::Vec4 t[3];
+
+				t[0] = Vec4( v[i+0].mPosition.x, v[i+0].mPosition.y, v[i+0].mPosition.z, 1.0f );
+				t[1] = Vec4( v[i+1].mPosition.x, v[i+1].mPosition.y, v[i+1].mPosition.z, 1.0f );
+				t[2] = Vec4( v[i+2].mPosition.x, v[i+2].mPosition.y, v[i+2].mPosition.z, 1.0f );
+
+				t[0] = inModelMatrix * t[0];
+				t[1] = inModelMatrix * t[1];
+				t[2] = inModelMatrix * t[2];
+
+				DrawLine( t[0], t[1], inModelColor );
+				DrawLine( t[1], t[2], inModelColor );
+				DrawLine( t[2], t[0], inModelColor );
+			}
+		}
+	
+		void DrawText3D( Vec3Arg inPosition, const string& inString, ColorArg inColor = Color::sWhite, float inHeight = 0.5f ) override
+		{
+			// No.
+			return;
+		}
+	};
+
+	PhysicsDebugRenderer PhysDebugRenderer;
+
+	// We need a temp allocator for temporary allocations during the physics update. We're
+	// pre-allocating 10 MB to avoid having to do allocations during the physics update. 
+	// B.t.w. 10 MB is way too much for this example but it is a typical value you can use.
+	// If you don't want to pre-allocate you can also use TempAllocatorMalloc to fall back to
+	// malloc / free.
+	TempAllocatorImpl TempAllocator( 10 * 1024 * 1024 );
+
+	// We need a job system that will execute physics jobs on multiple threads. Typically
+	// you would implement the JobSystem interface yourself and let Jolt Physics run on top
+	// of your own job scheduler. JobSystemThreadPool is an example implementation.
+	JobSystemThreadPool* JobSystem = nullptr;
+
+	// This is the max amount of rigid bodies that you can add to the physics system. If you try to add more you'll get an error.
+	// Note: This value is low because this is a simple test. For a real project use something in the order of 65536.
+	const JPH::uint cMaxBodies = 1024;
+
+	// This determines how many mutexes to allocate to protect rigid bodies from concurrent access. Set it to 0 for the default settings.
+	const JPH::uint cNumBodyMutexes = 0;
+
+	// This is the max amount of body pairs that can be queued at any time (the broad phase will detect overlapping
+	// body pairs based on their bounding boxes and will insert them into a queue for the narrowphase). If you make this buffer
+	// too small the queue will fill up and the broad phase jobs will start to do narrow phase work. This is slightly less efficient.
+	// Note: This value is low because this is a simple test. For a real project use something in the order of 65536.
+	const JPH::uint cMaxBodyPairs = 1024;
+
+	// This is the maximum size of the contact constraint buffer. If more contacts (collisions between bodies) are detected than this
+	// number then these contacts will be ignored and bodies will start interpenetrating / fall through the world.
+	// Note: This value is low because this is a simple test. For a real project use something in the order of 65536.
+	const JPH::uint cMaxContactConstraints = 1024;
+
+	// Create mapping table from object layer to broadphase layer
+	// Note: As this is an interface, PhysicsSystem will take a reference to this so this instance needs to stay alive!
+	phys::BPLayerInterfaceImpl BPLayerInterface;
+
+	JPH::PhysicsSystem PhysSystem;
+
+	BodyID FloorId, BoxId;
+}
+
+void PhysInit()
+{
+	using namespace phys;
+
+	JPH::Trace = []( const char* str, ... )
+	{
+		char buffer[2048U];
+		va_list arguments;
+
+		va_start( arguments, str );
+		vsprintf( buffer, str, arguments );
+		va_end( arguments );
+
+		std::cout << buffer << std::endl;
+	};
+
+	// Register all Jolt physics types
+	JPH::RegisterTypes();
+
+	// Now we can create the actual physics system.
+	PhysSystem.Init( cMaxBodies, cNumBodyMutexes, cMaxBodyPairs, cMaxContactConstraints, 
+		BPLayerInterface, MyBroadPhaseCanCollide, MyObjectCanCollide );
+
+	PhysSystem.SetGravity( Vec3( 0.0f, 0.0f, -9.81f ) );
+
+	// The main way to interact with the bodies in the physics system is through the body interface. There is a locking and a non-locking
+	// variant of this. We're going to use the locking version (even though we're not planning to access bodies from multiple threads)
+	BodyInterface& bodyInterface = PhysSystem.GetBodyInterface();
+
+	// Next we can create a rigid body to serve as the floor, we make a large box
+	// Create the settings for the collision volume (the shape). 
+	// Note that for simple shapes (like boxes) you can also directly construct a BoxShape.
+	BoxShapeSettings floorShapeSettings( Vec3( 20.0f, 20.0f, 0.5f ) );
+
+	// Create the shape
+	ShapeSettings::ShapeResult floorShapeResult = floorShapeSettings.Create();
+	ShapeRefC floorShape = floorShapeResult.Get(); // We don't expect an error here, but you can check floor_shape_result for HasError() / GetError()
+
+	// Create the settings for the body itself. Note that here you can also set other properties like the restitution / friction.
+	BodyCreationSettings floorSettings( floorShape, Vec3( 0.0f, 0.0f, -1.0f ), Quat::sIdentity(), EMotionType::Static, Layers::NON_MOVING );
+
+	// Create the actual rigid body
+	Body* floor = bodyInterface.CreateBody( floorSettings ); // Note that if we run out of bodies this can return nullptr
+	FloorId = floor->GetID();
+
+	// Add it to the world
+	bodyInterface.AddBody( floor->GetID(), EActivation::DontActivate );
+
+	// Now create a dynamic body to bounce on the floor
+	// Note that this uses the shorthand version of creating and adding a body to the world
+	BoxShapeSettings boxShapeSettings( Vec3( 6.0f, 7.0f, 4.0f ) );
+	ShapeSettings::ShapeResult boxShapeResult = boxShapeSettings.Create();
+	ShapeRefC boxShape = boxShapeResult.Get();
+
+	BodyCreationSettings boxSettings( boxShape, Vec3( 0.0f, 0.0f, 60.0f ), Quat::sIdentity() * Quat::sEulerAngles( Vec3( 0.333f, 0.2f, 0.05f ) ), EMotionType::Dynamic, Layers::MOVING);
+	BoxId = bodyInterface.CreateAndAddBody( boxSettings, EActivation::Activate );
+
+	// Now you can interact with the dynamic body, in this case we're going to give it a velocity.
+	// (note that if we had used CreateBody then we could have set the velocity straight on the body before adding it to the physics system)
+	bodyInterface.SetLinearVelocity( BoxId, Vec3( 0.0f, 0.0f, 5.0f ) );
+
+	// We simulate the physics world in discrete time steps. 60 Hz is a good rate to update the physics system.
+	const float cDeltaTime = 1.0f / 60.0f;
+
+	// Optional step: Before starting the physics simulation you can optimize the broad phase. This improves collision detection performance (it's pointless here because we only have 2 bodies).
+	// You should definitely not call this every frame or when e.g. streaming in a new level section as it is an expensive operation.
+	// Instead insert all new objects in batches instead of 1 at a time to keep the broad phase efficient.
+	PhysSystem.OptimizeBroadPhase();
+
+	// Look at PhysShutdown for why we're doing this
+	phys::JobSystem = new JobSystemThreadPool( JPH::cMaxPhysicsJobs, JPH::cMaxPhysicsBarriers, std::thread::hardware_concurrency() - 1 );
+}
+
+void PhysUpdate( const float& deltaTime )
+{
+	phys::PhysSystem.Update( deltaTime, 2, 4, &phys::TempAllocator, phys::JobSystem );
+
+	static JPH::BodyManager::DrawSettings ds;
+	ds.mDrawShapeWireframe = true;
+	ds.mDrawShape = true;
+	phys::PhysSystem.DrawBodies( ds, &phys::PhysDebugRenderer );
+}
+
+void PhysShutdown()
+{
+	auto& bodyInterface = phys::PhysSystem.GetBodyInterface();
+
+	bodyInterface.RemoveBody( phys::BoxId );
+	bodyInterface.RemoveBody( phys::FloorId );
+
+	bodyInterface.DestroyBody( phys::BoxId );
+	bodyInterface.DestroyBody( phys::FloorId );
+
+	// If we kept the job system as a non-pointer, it'd get destroyed at the end of the program
+	// which, for some reason, would crash because some threads are nullptr :)
+	delete phys::JobSystem;
 }
 
 void RunFrame( const float& deltaTime, const UserCommands& uc )
@@ -398,7 +725,22 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 	// Draw some polygons
 	SDL_SetRenderDrawColor( renderer, 255, 255, 255, 255 );
 
-	TestPolygonIntersection( time );
+	// Grid
+	{
+		using adm::Vec3;
+
+		SDL_SetRenderDrawColor( renderer, 128, 128, 128, 255 );
+		for ( int x = -8; x <= 8; x++ )
+		{
+			DrawLine3D( Vec3::Forward * 20.0f + (Vec3::Right * 20.0f / 8.0f) * x, Vec3::Forward * -20.0f + (Vec3::Right * 20.0f / 8.0f) * x );
+		}
+		for ( int y = -8; y <= 8; y++ )
+		{
+			DrawLine3D( Vec3::Right * 20.0f + (Vec3::Forward * 20.0f / 8.0f) * y, Vec3::Right * -20.0f + (Vec3::Forward * 20.0f / 8.0f) * y );
+		}
+	}
+
+	PhysUpdate( deltaTime );
 
 	// Crosshair
 	//if ( false )
@@ -454,6 +796,8 @@ int main( int argc, char** argv )
 	renderer = SDL_CreateRenderer( window, 0, SDL_RENDERER_SOFTWARE );
 	SDL_SetRelativeMouseMode( SDL_TRUE );
 
+	PhysInit();
+
 	float deltaTime = 0.016f;
 	while ( true )
 	{
@@ -478,6 +822,7 @@ int main( int argc, char** argv )
 		}
 	}
 
+	PhysShutdown();
 	SDL_Quit();
 
 	return 0;
