@@ -8,6 +8,11 @@ set_property( GLOBAL PROPERTY USE_FOLDERS ON )
 ## C++17 cuz' adm-utils
 set( CMAKE_CXX_STANDARD 17 )
 
+## Use the static runtime library
+if ( WIN32 )
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 ## I have a habit of setting a root variable cuz' I'm lazy to type CMAKE_CURRENT_SOURCE_DIR every time
 ## In projects like these, which aren't meant to be used as dependencies, I prefix stuff with THE_,
 ## cuz' it's THE stuff, there won't be any other
@@ -42,6 +47,9 @@ set( GLM_INCLUDE_DIRS
 set( THE_SOURCES
     src/Main.cpp )
 
+## JoltPhysics
+add_subdirectory( extern/JoltPhysics/Build )
+
 ## Folder organisation
 source_group( TREE ${THE_ROOT} FILES ${THE_SOURCES} )
 
@@ -53,10 +61,11 @@ target_include_directories( SoftRenda PRIVATE
     ${THE_ROOT}
     ${ADMUTIL_INCLUDE_DIRECTORY}
     ${SDL2_INCLUDE_DIRS}
-    ${GLM_INCLUDE_DIRS} )
+    ${GLM_INCLUDE_DIRS}
+    ${THE_ROOT}/extern/JoltPhysics/Jolt )
 
 ## Link against SDL2 libs
-target_link_libraries( SoftRenda PRIVATE ${SDL2_LIBRARIES} AdmUtils )
+target_link_libraries( SoftRenda PRIVATE ${SDL2_LIBRARIES} AdmUtils Jolt )
 
 ## Output here
 install( TARGETS SoftRenda
