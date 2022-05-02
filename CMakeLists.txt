@@ -40,7 +40,18 @@ set( GLM_INCLUDE_DIRS
     ${THE_ROOT}/extern/glm )
 
 set( THE_SOURCES
-    src/Main.cpp )
+    src/Main.cpp 
+    src/audio/ILoader.hpp 
+    src/audio/Loader.cpp
+    src/audio/WAV/dr_wav.h 
+    src/audio/WAV/WAVLoader.cpp
+    src/audio/WAV/WAVLoader.hpp )
+
+## OpenAL-soft
+add_subdirectory( extern/openal-soft )
+set( OPENAL_INCLUDE_DIRS 
+    extern/openal-soft/include
+    extern/openal-soft )
 
 ## Folder organisation
 source_group( TREE ${THE_ROOT} FILES ${THE_SOURCES} )
@@ -53,10 +64,11 @@ target_include_directories( SoftRenda PRIVATE
     ${THE_ROOT}
     ${ADMUTIL_INCLUDE_DIRECTORY}
     ${SDL2_INCLUDE_DIRS}
-    ${GLM_INCLUDE_DIRS} )
+    ${GLM_INCLUDE_DIRS} 
+    ${OPENAL_INCLUDE_DIRS} )
 
 ## Link against SDL2 libs
-target_link_libraries( SoftRenda PRIVATE ${SDL2_LIBRARIES} AdmUtils )
+target_link_libraries( SoftRenda PRIVATE ${SDL2_LIBRARIES} AdmUtils OpenAL ex-common )
 
 ## Output here
 install( TARGETS SoftRenda
