@@ -92,36 +92,6 @@ void DrawLine( const float& x1, const float& y1, const float& x2, const float& y
 	SDL_RenderDrawLineF( renderer, t1.x, t1.y, t2.x, t2.y );
 }
 
-inline glm::vec4 GetVec4From( const glm::vec3& v )
-{
-	return glm::vec4( v, 1.0f );
-}
-
-struct Triangle
-{
-	void Draw() const
-	{
-		const glm::vec4 transformed[3]
-		{
-			projMatrix * viewMatrix * GetVec4From( verts[0] ),
-			projMatrix * viewMatrix * GetVec4From( verts[1] ),
-			projMatrix * viewMatrix * GetVec4From( verts[2] )
-		};
-		
-		for ( int i = 0; i < 3; i++ )
-		{
-			const int next = (i + 1) % 3;
-			DrawLine( 
-				transformed[i].x / transformed[i].w, 
-				transformed[i].y / transformed[i].w,
-				transformed[next].x / transformed[next].w, 
-				transformed[next].y / transformed[next].w );
-		}
-	}
-
-	glm::vec3 verts[3];
-};
-
 void DrawLine3D( const adm::Vec3& a, const adm::Vec3& b )
 {
 	glm::vec4 at = projMatrix * viewMatrix * glm::vec4{ a.x, a.y, a.z, 1.0f };
@@ -314,63 +284,205 @@ inline float crandom()
 	return rand() / 32768.0f;
 }
 
-inline glm::vec3 randVec()
-{
-	return glm::vec3( crandom(), crandom(), crandom() ) * crandom() * 15.0f;
-}
+#include <AL/al.h>
+#include <examples/common/alhelpers.h>
+#include "audio/ILoader.hpp"
 
-void TestPolygonIntersection( const float& time )
+namespace Audio
 {
-	using namespace adm;
-
-	static Plane planes[] =
+	struct AudioEntity
 	{
-		Plane( Vec3( 20.0f, 40.0f, 100.0f ).Normalized(), 2.0f),
-		Plane( Vec3::Right, 12.0f ),
-		Plane( -Vec3::Right, 6.0f ),
-		Plane( -Vec3::Up, 1.0f ),
-		Plane( Vec3::Forward, 10.0f ),
-		Plane( -Vec3::Forward, 9.0f )
+		adm::Vec3 position;
+		adm::String soundPath;
 	};
 
-	planes[0].SetNormal( (Vec3::Up * 4.0f + Vec3( std::sin(time), std::cos(time * 0.4f), 0.0f) ).Normalized() );
-	planes[1].SetNormal( (Vec3::Right * 12.0f + Vec3( std::sin(time * 2.0f), std::cos(time * 0.87f), 0.0f) ).Normalized() );
-
-	// Blue-ish for the planes
-	//SDL_SetRenderDrawColor( renderer, 100, 100, 255, 255 );
-	Polygon polygons[std::size( planes )];
-	for ( size_t i = 0U; i < std::size( planes ); i++ )
+	struct AudioBuffer
 	{
-		polygons[i] = Polygon(planes[i], 20.0f);
-		DrawPolygon( polygons[i] );
+		void Init( int format, int frequency )
+		{
+			alGenBuffers( 1, &handle );
+			// We are subtracting data.size() % 4 because OpenAL-soft likes a certain alignment
+			alBufferData( handle, format, data.data(), data.size() - (data.size() % 4), frequency);
+		}
+
+		adm::String name;
+		adm::Vector<int8_t> data;
+		ALuint handle{ 0 };
+	};
+
+	struct AudioSource
+	{
+		void Init()
+		{
+			alGenSources( 1, &handle );
+			alSourcef( handle, AL_PITCH, 1.0f );
+			alSourcef( handle, AL_GAIN, 1.0f );
+			alSource3f( handle, AL_POSITION, position.x, position.y, position.z );
+			alSource3f( handle, AL_DIRECTION, 1.0f, 0.0f, 0.0f ); // Face forward axis by default
+			alSource3f( handle, AL_VELOCITY, 0.0f, 0.0f, 0.0f );
+			alSourcef( handle, AL_MAX_DISTANCE, 1000.0f );
+			alSourcef( handle, AL_REFERENCE_DISTANCE, 50.0f );
+			alSourcei( handle, AL_LOOPING, AL_TRUE );
+			alSourcei( handle, AL_BUFFER, soundBuffer );
+		
+			Play();
+		}
+
+		void Play()
+		{
+			alSourcePlay( handle );
+		}
+
+		adm::Vec3 position;
+		ALuint soundBuffer{ 0 };
+		ALuint handle{ 0 };
+	};
+
+	adm::Vector<AudioBuffer> Buffers;
+	adm::Vector<AudioEntity> Entities;
+	adm::Vector<AudioSource> Sources;
+
+	ALenum OpenAL_GetFormat( int channels, int bitsPerChannel )
+	{
+		if ( channels == 1 && bitsPerChannel == 8 )
+		{
+			return AL_FORMAT_MONO8;
+		}
+		if ( channels == 2 && bitsPerChannel == 8 )
+		{
+			return AL_FORMAT_STEREO8;
+		}
+
+		if ( channels == 1 && bitsPerChannel == 16 )
+		{
+			return AL_FORMAT_MONO16;
+		}
+		if ( channels == 2 && bitsPerChannel == 16 )
+		{
+			return AL_FORMAT_STEREO16;
+		}
+
+		std::cout << "Unknown format: channels = " << channels
+			<< ", bits per channel = " << bitsPerChannel << std::endl;
+		return 0;
 	}
 
-	// For every huge polygon generated from the planes
-	for ( int i = 0; i < std::size( polygons ); i++ )
+	bool LoadSound( const char* filePath )
 	{
-		// Clip against every other plane and modify the polygon
-		for ( int j = 0; j < std::size( planes ); j++ )
+		for ( const auto& buffer : Buffers )
 		{
-			// No need to clip against the same plane
-			if ( i == j )
+			// Already loaded
+			if ( buffer.name == filePath )
 			{
-				continue;
-			}
-
-			auto result = polygons[i].Split( planes[j] );
-			if ( result.didIntersect && result.back.has_value() )
-			{
-				// Modify the polygon we started off from
-				polygons[i] = result.back.value();
-				// Red for the intersecting polygons
-				SDL_SetRenderDrawColor( renderer, 255, 0, 0, 255 );
-				DrawPolygon( polygons[i] );
+				return true;
 			}
 		}
 
-		// Orange for the final polygons
-		SDL_SetRenderDrawColor( renderer, 255, 192, 64, 255 );
-		DrawPolygon( polygons[i], true );
+		ILoader* loader = GetLoaderForFile( filePath );
+		if ( nullptr == loader )
+		{
+			std::cout << "Can't load sound file: " << filePath << std::endl;
+			return false;
+		}
+
+		loader->Load( filePath );
+		if ( nullptr == loader->GetData() )
+		{
+			std::cout << "Can't read sound file" << std::endl;
+			return false;
+		}
+
+		AudioBuffer buffer;
+		buffer.name = filePath;
+		buffer.data = adm::Vector<int8_t>( loader->GetData(), loader->GetData() + loader->GetLength() - 1U );
+
+		buffer.Init( OpenAL_GetFormat( loader->GetChannels(), loader->GetBitsPerChannel() ), loader->GetSampleRate() );
+		
+		Buffers.push_back( std::move( buffer ) );
+
+		loader->Dispose();
+
+		return true;
+	}
+
+	ALuint GetSoundBuffer( const char* soundName )
+	{
+		for ( const auto& buffer : Buffers )
+		{
+			if ( buffer.name == soundName )
+			{
+				return buffer.handle;
+			}
+		}
+
+		return 0;
+	}
+
+	void Init()
+	{
+		if ( ::InitAL( nullptr, nullptr ) )
+		{
+			std::cout << "Could not initialise OpenAL-soft" << std::endl;
+			return;
+		}
+
+		alDistanceModel( AL_LINEAR_DISTANCE_CLAMPED );
+
+		for ( const auto& ent : Entities )
+		{
+			if ( LoadSound( ent.soundPath.c_str() ) )
+			{
+				AudioSource source
+				{
+					ent.position,
+					GetSoundBuffer( ent.soundPath.c_str() )
+				};
+
+				source.Init();
+
+				Sources.push_back( std::move( source ) );
+			}
+		}
+	}
+
+	void Update( const float& deltaTime )
+	{
+		float orientation[6]
+		{
+			viewForward.x, viewForward.y, viewForward.z,
+			viewUp.x, viewUp.y, viewUp.z
+		};
+		alListener3f( AL_POSITION, viewOrigin.x, viewOrigin.y, viewOrigin.z );
+		alListener3f( AL_VELOCITY, 0.0f, 0.0f, 0.0f );
+		alListenerfv( AL_ORIENTATION, orientation );
+
+		for ( const auto& ent : Sources )
+		{
+			SDL_SetRenderDrawColor( renderer, 30, 200, 255, 255 );
+			DrawLine3D( ent.position - adm::Vec3::Forward * 5.0f, ent.position + adm::Vec3::Forward * 5.0f );
+			DrawLine3D( ent.position - adm::Vec3::Right * 5.0f, ent.position + adm::Vec3::Right * 5.0f );
+			DrawLine3D( ent.position - adm::Vec3::Up * 5.0f, ent.position + adm::Vec3::Up * 5.0f );
+		}
+	}
+
+	void Shutdown()
+	{
+		for ( auto& source : Sources )
+		{
+			alSourceStop( source.handle );
+			alDeleteSources( 1, &source.handle );
+		}
+
+		for ( auto& buffer : Buffers )
+		{
+			alDeleteBuffers( 1, &buffer.handle );
+		}
+
+		Sources.clear();
+		Buffers.clear();
+		Entities.clear();
+
+		::CloseAL();
 	}
 }
 
@@ -622,6 +734,16 @@ namespace Map
 					ParseBrush( lex, token );
 				}
 			}
+	
+			if ( entityProperties["classname"] == "ambient_generic" )
+			{
+				Audio::Entities.push_back( {
+					entityProperties.GetVec3( "origin" ),
+					entityProperties.GetString( "sound", "default.wav" ) } );
+
+				std::cout << "Spawned ambient_generic (" << entityProperties.GetString( "sound", "default.wav" )
+					<< ") at " << entityProperties.GetString( "origin" ) << std::endl;
+			}
 		}
 	}
 
@@ -749,6 +871,8 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		DrawPolygon( p );
 	}
 
+	Audio::Update( deltaTime );
+
 	// Crosshair
 	//if ( false )
 	{
@@ -804,6 +928,7 @@ int main( int argc, char** argv )
 	SDL_SetRelativeMouseMode( SDL_TRUE );
 
 	Map::Load();
+	Audio::Init();
 
 	float deltaTime = 0.016f;
 	while ( true )
@@ -828,6 +953,8 @@ int main( int argc, char** argv )
 			deltaTime += remainingTime;
 		}
 	}
+
+	Audio::Shutdown();
 
 	SDL_Quit();
 
