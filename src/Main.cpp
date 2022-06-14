@@ -23,7 +23,7 @@ glm::vec3 viewForward{ 1.0f, 0.0f, 0.0f };
 glm::vec3 viewRight{ 0.0f, -1.0f, 0.0f };
 glm::vec3 viewUp{ 0.0f, 0.0f, 1.0f };
 
-constexpr float viewSpeed = 100.0f;
+constexpr float viewSpeed = 220.0f;
 
 glm::mat4 projMatrix;
 glm::mat4 viewMatrix;
@@ -94,6 +94,16 @@ void DrawLine( const float& x1, const float& y1, const float& x2, const float& y
 
 void DrawLine3D( const adm::Vec3& a, const adm::Vec3& b )
 {
+	const float dotA = (a - adm::Vec3( &viewOrigin.x )).Normalized() * &viewForward.x;
+	const float dotB = (b - adm::Vec3( &viewOrigin.x )).Normalized() * &viewForward.x;
+
+	// Very simple form of occlusion culling
+	// 0.5 is the cosine of 60 degrees
+	if ( dotA < 0.33f && dotB < 0.33f )
+	{
+		return;
+	}
+
 	glm::vec4 at = projMatrix * viewMatrix * glm::vec4{ a.x, a.y, a.z, 1.0f };
 	glm::vec4 bt = projMatrix * viewMatrix * glm::vec4{ b.x, b.y, b.z, 1.0f };
 
@@ -486,6 +496,143 @@ namespace Audio
 	}
 }
 
+#include "bsp/BspFormat.hpp"
+
+namespace Bsp
+{
+	adm::Vector<uint8_t> BspRawData;
+	GoldBsp::BspHeader BspHeader;
+	GoldBsp::BspMapData Bsp;
+	adm::Vector<adm::Array<adm::Vec3, 2>> BspWires;
+
+	/*
+	Output for test.bsp:
+
+	models             52/512         3328/32768    (10.2%)
+	planes            468/32768       9360/655360   ( 1.4%)
+	vertexes          865/65535      10380/786420   ( 1.3%)
+	nodes             415/32767       9960/786408   ( 1.3%)
+	texinfos          303/32767      12120/1310680  ( 0.9%)
+	faces             636/65535      12720/1310700  ( 1.0%)
+	* worldfaces      156/32768          0/0        ( 0.5%)
+	clipnodes        1322/32767      10576/262136   ( 4.0%)
+	leaves            390/32760      10920/917280   ( 1.2%)
+	* worldleaves       1/8192           0/0        ( 0.0%)
+	marksurfaces      636/65535       1272/131070   ( 1.0%)
+	surfedges        2818/512000     11272/2048000  ( 0.6%)
+	edges            1410/256000      5640/1024000  ( 0.6%)
+	texdata          [variable]      95816/33554432 ( 0.3%)
+	lightdata        [variable]      95688/50331648 ( 0.2%)
+	visdata          [variable]          1/8388608  ( 0.0%)
+	entdata          [variable]      24110/2097152  ( 1.1%)
+	* AllocBlock        3/64             0/0        ( 4.7%)
+	
+	*/
+
+	void Init()
+	{
+		std::cout << "======================" << std::endl;
+		std::cout << " BSP LOADING FACILITY " << std::endl;
+		std::cout << "======================" << std::endl;
+
+		std::ifstream bspFile = std::ifstream( "test.bsp", std::ios::binary | std::ios::ate );
+		
+		if ( !bspFile )
+		{
+			std::cout << "Warning: Can't load test.bsp" << std::endl;
+			return;
+		}
+
+		//const auto fileSize = std::filesystem::file_size( "test.bsp" );
+		// Another silly way to check filesize, but eh
+		const size_t fileSize = bspFile.tellg();
+		bspFile.seekg( 0 );
+		std::cout << "test.bsp, size: " << fileSize / 1024 << " KB (" << fileSize << " bytes)" << std::endl;
+
+		if ( fileSize > (30 * 1024 * 1024) )
+		{
+			std::cout << "It seems abnormally large (over 30 MB), won't try loading it..." << std::endl;
+			return;
+		}
+
+		// Copy over all contents of the file
+		BspRawData.reserve( fileSize );
+		bspFile.read( reinterpret_cast<char*>( BspRawData.data() ), fileSize );
+		// Interpret the first 124 bytes or so, as the BSP header
+		BspHeader = GoldBsp::BspHeader( BspRawData.data() );
+		// Populate the rest of the BSP structures from the header's lump info
+		Bsp = GoldBsp::BspMapData( BspHeader );
+
+		if ( !Bsp.IsOkay() )
+		{
+			std::cout << "Error loading the BSP..." << std::endl;
+			return;
+		}
+
+		std::cout << "BSP INFO:" << std::endl
+			<< "BSP models: " << Bsp.numModels << std::endl
+			<< "Textures: " << Bsp.numTextureInfos << std::endl
+			<< "Clipnodes: " << Bsp.numClipnodes << std::endl
+			<< "MarkSurfaces: " << Bsp.numMarkSurfaces << std::endl;
+
+		std::cout << "LUMP INFO: " << std::endl;
+		for ( const auto& lump : BspHeader.lumps )
+		{
+			const auto lumpType = static_cast<GoldBsp::BspLump::EnumType>( &lump - BspHeader.lumps );
+			std::cout << "   Lump '" << GoldBsp::BspLump::GetStringForLump( lumpType ) << "'"
+				<< " - offset: " << lump.offset << ", length: " << lump.length << std::endl;
+		}
+
+		auto& plane = Bsp.bspPlanes[0];
+		std::cout << plane.normal[0] << ' ' << plane.distance << ' ' << plane.type << std::endl;
+
+		const auto* worldModel = &Bsp.bspModels[0];
+
+		std::cout << "worldModel->numFaces: " << worldModel->numFaces << std::endl;;
+
+		for ( int ms = 0; ms < worldModel->numFaces; ms++ )
+		{
+			const auto& face = Bsp.bspFaces[ms + worldModel->firstFaceIndex];
+			for ( int e = 0; e < face.numEdges; e++ )
+			{
+				// surfaceEdges can be negative, indicating an edge in reverse order, but it does not matter in our case
+				const auto edgeID = std::abs( Bsp.surfaceEdges[e + face.firstEdgeIndex] );
+				const auto& edge = Bsp.bspEdges[edgeID];
+
+				if ( edgeID > Bsp.numEdges )
+				{
+					std::cout << "MarkSurface " << ms << " surfaceEdge " << e << " has out-of-range edge: " << edgeID << std::endl;
+					continue;
+				}
+
+				adm::Vec3 a = Bsp.bspVertices[edge.vertexIndices[0]].point;
+				adm::Vec3 b = Bsp.bspVertices[edge.vertexIndices[1]].point;
+
+				adm::Array<adm::Vec3, 2> ab = { a, b };
+
+				BspWires.push_back( std::move( ab ) );
+			}
+		}
+	}
+
+	// Draw da bee em spee
+	void Update()
+	{
+		SDL_SetRenderDrawColor( renderer, 60, 170, 100, 255 );
+		for ( const auto& wire : BspWires )
+		{
+			DrawLine3D( wire[0], wire[1] );
+		}
+	}
+
+	void Shutdown()
+	{
+		// There used to be some memory deallocation here,
+		// but yea, neither BspHeader nor BspMapData
+		// actually need it, cuz' they're not pointers now
+	}
+}
+
 namespace Map
 {
 	struct MapFace
@@ -841,8 +988,8 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 	static float time = 0.0f;
 	time += deltaTime;
 
-	viewAngles.x += uc.mouseY * deltaTime * 2.0f;
-	viewAngles.y += uc.mouseX * deltaTime * 2.0f;
+	viewAngles.x += uc.mouseY * (1.0f / 60.0f) * 2.0f;
+	viewAngles.y += uc.mouseX * (1.0f / 60.0f) * 2.0f;
 	//viewAngles.z = std::sinf( time ) * 15.0f;
 
 	// Clamp the pitch
@@ -852,7 +999,7 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		viewAngles.x = -89.9f;
 
 	// Offset the view position
-	const float adjustedViewSpeed = viewSpeed * ((uc.flags & UserCommands::SpeedModifier) ? 1.5f : 1.0f);
+	const float adjustedViewSpeed = viewSpeed * ((uc.flags & UserCommands::SpeedModifier) ? 2.5f : 1.0f);
 
 	viewOrigin += uc.forward * viewForward * deltaTime * adjustedViewSpeed;
 	viewOrigin += uc.right * viewRight * deltaTime * adjustedViewSpeed;
@@ -872,6 +1019,7 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 	}
 
 	Audio::Update( deltaTime );
+	Bsp::Update();
 
 	// Crosshair
 	//if ( false )
@@ -928,6 +1076,7 @@ int main( int argc, char** argv )
 	SDL_SetRelativeMouseMode( SDL_TRUE );
 
 	Map::Load();
+	Bsp::Init();
 	Audio::Init();
 
 	float deltaTime = 0.016f;
@@ -954,6 +1103,7 @@ int main( int argc, char** argv )
 		}
 	}
 
+	Bsp::Shutdown();
 	Audio::Shutdown();
 
 	SDL_Quit();

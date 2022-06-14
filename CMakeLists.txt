@@ -45,7 +45,9 @@ set( THE_SOURCES
     src/audio/Loader.cpp
     src/audio/WAV/dr_wav.h 
     src/audio/WAV/WAVLoader.cpp
-    src/audio/WAV/WAVLoader.hpp )
+    src/audio/WAV/WAVLoader.hpp
+    src/bsp/BspFormat.cpp
+    src/bsp/BspFormat.hpp )
 
 ## OpenAL-soft
 add_subdirectory( extern/openal-soft )
