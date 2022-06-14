@@ -193,6 +193,9 @@ struct UserCommands
 
 	float mouseX{ 0.0f };
 	float mouseY{ 0.0f };
+
+	float windowMouseX{ 0.0f };
+	float windowMouseY{ 0.0f };
 };
 
 UserCommands GenerateUserCommands()
@@ -213,18 +216,6 @@ UserCommands GenerateUserCommands()
 		if ( e.type == SDL_QUIT )
 		{
 			uc.flags |= UserCommands::Quit;
-		}
-
-		else if ( e.type == SDL_MOUSEBUTTONDOWN )
-		{
-			if ( e.button.button == SDL_BUTTON_LEFT )
-			{
-				uc.flags |= UserCommands::LeftMouseButton;
-			}
-			if ( e.button.button == SDL_BUTTON_RIGHT )
-			{
-				uc.flags |= UserCommands::RightMouseButton;
-			}
 		}
 	}
 
@@ -258,6 +249,19 @@ UserCommands GenerateUserCommands()
 	SDL_GetRelativeMouseState( &x, &y );
 	uc.mouseX = x;
 	uc.mouseY = y;
+
+	int mouseState = SDL_GetMouseState( &x, &y );
+	uc.windowMouseX = x;
+	uc.windowMouseY = y;
+
+	if ( mouseState & SDL_BUTTON_LMASK )
+	{
+		uc.flags |= UserCommands::LeftMouseButton;
+	}
+	if ( mouseState & SDL_BUTTON_RMASK )
+	{
+		uc.flags |= UserCommands::RightMouseButton;
+	}
 
 	return uc;
 }
@@ -728,8 +732,12 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 	static float time = 0.0f;
 	time += deltaTime;
 
-	viewAngles.x += uc.mouseY * deltaTime * 2.0f;
-	viewAngles.y += uc.mouseX * deltaTime * 2.0f;
+	if ( uc.flags & UserCommands::Flags::RightMouseButton )
+	{
+		viewAngles.x += uc.mouseY * deltaTime * 4.0f;
+		viewAngles.y += uc.mouseX * deltaTime * 4.0f;
+	}
+	
 	//viewAngles.z = std::sinf( time ) * 15.0f;
 
 	// Clamp the pitch
@@ -810,7 +818,7 @@ int main( int argc, char** argv )
 
 	window = SDL_CreateWindow( "SoftRenda", CENTER, CENTER, windowWidth, windowHeight, SDL_WINDOW_RESIZABLE );
 	renderer = SDL_CreateRenderer( window, 0, SDL_RENDERER_SOFTWARE );
-	SDL_SetRelativeMouseMode( SDL_TRUE );
+	SDL_SetRelativeMouseMode( SDL_FALSE );
 
 	Map::Load();
 
