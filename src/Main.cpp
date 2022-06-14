@@ -28,15 +28,24 @@ constexpr float viewSpeed = 100.0f;
 glm::mat4 projMatrix;
 glm::mat4 viewMatrix;
 
+// Converts x from [-1,1] into [0,1]
+template<typename T, typename OperationType = float>
+constexpr T nto( const T& x )
+{
+	return (OperationType( 0.5 ) * x) + T( OperationType( 0.5 ) );
+}
+
+// Converts x from [0,1] into [-1,1]
+template<typename T, typename OperationType = float>
+constexpr T otn( const T& x )
+{
+	return (OperationType( 2.0 ) * x) - T( OperationType( 1.0 ) );
+}
+
 // Takes points in [-1, 1] coordinates, will convert them to screen coords properly
 void DrawLine( const float& x1, const float& y1, const float& x2, const float& y2 )
 {
 	using glm::vec2;
-
-	const auto ntoz = []( const float& n )
-	{
-		return (n * 0.5f) + 0.5f;
-	};
 
 	// @returns true if it should be displayed, false if not, outputs to p1 and p2
 	const auto clipViewport = []( glm::vec2& p1, glm::vec2& p2, const glm::vec2& normal, const float& dist )
@@ -69,8 +78,8 @@ void DrawLine( const float& x1, const float& y1, const float& x2, const float& y
 	};
 
 	// Transformed ones
-	vec2 t1 = { ntoz( x1 ) * windowWidth, (1.0f - ntoz( y1 )) * windowHeight };
-	vec2 t2 = { ntoz( x2 ) * windowWidth, (1.0f - ntoz( y2 )) * windowHeight };
+	vec2 t1 = { nto( x1 ) * windowWidth, (1.0f - nto( y1 )) * windowHeight };
+	vec2 t2 = { nto( x2 ) * windowWidth, (1.0f - nto( y2 )) * windowHeight };
 
 	const vec2 Up = { 0.0f, 1.0f };
 	const vec2 Down = { 0.0f, -1.0f };
