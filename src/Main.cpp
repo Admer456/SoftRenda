@@ -266,6 +266,33 @@ UserCommands GenerateUserCommands()
 	return uc;
 }
 
+glm::vec3 ScreenToWorldDirection( const glm::mat4& proj, const glm::mat4& view, const glm::vec2& screen, const glm::vec2& viewport )
+{
+	// Treat the position as 0,0,0 as we're only interested in the direction
+	glm::mat4 viewModified = view;
+	viewModified[3][0] = 0.0f;
+	viewModified[3][1] = 0.0f;
+	viewModified[3][2] = 0.0f;
+
+	const glm::vec2 screenNdc = otn( glm::vec2( screen.x / viewport.x, screen.y / viewport.y ) );
+	const glm::vec4 direction = glm::inverse( proj * viewModified ) * glm::vec4( screenNdc.x, -screenNdc.y, -1.0f, 1.0f );
+
+	return glm::vec3( direction );
+}
+
+void DrawCross( const glm::vec3& pos )
+{
+	using adm::Vec3;
+
+	// This is kinda elegant I think :3c
+	Vec3 position = &pos.x;
+
+	SDL_SetRenderDrawColor( renderer, 128, 255, 0, 255 );
+	DrawLine3D( position + Vec3::Up * 0.25f, position - Vec3::Up * 0.25f );
+	DrawLine3D( position + Vec3::Right * 0.25f, position - Vec3::Right * 0.25f );
+	DrawLine3D( position + Vec3::Forward * 0.25f, position - Vec3::Forward * 0.25f );
+}
+
 void SetupMatrices()
 {
 	using namespace glm;
@@ -772,7 +799,24 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		using adm::Vec3;
 
 		static glm::vec3 crosshairOrigin = viewOrigin;
-		crosshairOrigin += ((viewOrigin + viewForward * 5.0f) - crosshairOrigin) * deltaTime * 20.0f;
+
+		// Draw a crosshair here
+		if ( uc.flags & UserCommands::LeftMouseButton )
+		{
+			const glm::vec2 screen{ uc.windowMouseX, uc.windowMouseY };
+			const glm::vec2 viewport{ windowWidth, windowHeight };
+			const glm::vec3 screenToWorld = ScreenToWorldDirection( projMatrix, viewMatrix, screen, viewport );
+			const glm::vec3 pos = viewOrigin + screenToWorld * 10.0f;
+
+			DrawCross( pos );
+
+			// Also attract the main crosshair
+			crosshairOrigin += (pos - crosshairOrigin) * deltaTime * 20.0f;
+		}
+		else
+		{
+			crosshairOrigin += ((viewOrigin + viewForward * 5.0f) - crosshairOrigin) * deltaTime * 20.0f;
+		}
 
 		// This is kinda elegant I think :3c
 		Vec3 crosshair = &crosshairOrigin.x;
