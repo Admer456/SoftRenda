@@ -483,16 +483,14 @@ namespace CollisionModel
 	{
 		for ( const auto& p : surfaces )
 		{
-			Triangle t;
-
 			for ( int i = 2; i < p.vertices.size(); i++ )
 			{
+				Triangle t;
 				t.verts[0] = ToGlmVec( p.vertices[0] );
 				t.verts[1] = ToGlmVec( p.vertices[i-1] );
 				t.verts[2] = ToGlmVec( p.vertices[i] );
+				Triangles.push_back( t );
 			}
-
-			Triangles.push_back( t );
 		}
 	}
 
