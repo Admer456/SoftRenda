@@ -106,6 +106,14 @@ inline glm::vec4 GetVec4From( const glm::vec3& v )
 	return glm::vec4( v, 1.0f );
 }
 
+struct RayCastData
+{
+	float distance;
+	glm::vec3 endPoint;
+};
+
+using RayCastResult = std::optional<RayCastData>;
+
 struct Triangle
 {
 	void Draw() const
@@ -126,6 +134,55 @@ struct Triangle
 				transformed[next].x / transformed[next].w, 
 				transformed[next].y / transformed[next].w );
 		}
+	}
+
+	RayCastResult IntersectsRay( const glm::vec3& point, const glm::vec3& direction ) const
+	{
+		using glm::vec3;
+
+		const glm::vec3 edge1 = verts[1] - verts[0];
+		const glm::vec3 edge2 = verts[2] - verts[0];
+
+		const glm::vec3 hypotenuse = glm::cross( direction, edge2 );
+		const float angle = glm::dot( edge1, hypotenuse );
+
+		if ( angle == 0.0f )
+		{
+			return {};
+		}
+
+		const float fraction = 1.0f / angle;
+
+		const glm::vec3 s = point - verts[0];
+		const float u = fraction * (glm::dot( s, hypotenuse ));
+
+		if ( u < 0.0f || u > 1.0f )
+		{
+			return {};
+		}
+
+		const glm::vec3 q = cross( s, edge1 );
+		const float v = fraction * glm::dot( direction, q );
+
+		if ( v < 0.0f || u + v > 1.0f )
+		{
+			return {};
+		}
+
+		// At this stage, we can compute t to find out where
+		// the intersection point is on the line
+		const float t = fraction * dot( edge2, q );
+
+		// The ray has intersected either the triangle or the line
+		if ( t > 0.0f )
+		{
+			RayCastData data;
+			data.distance = t;
+			data.endPoint = point + direction * t;
+			return data;
+		}
+
+		return {};
 	}
 
 	glm::vec3 verts[3];
@@ -280,17 +337,16 @@ glm::vec3 ScreenToWorldDirection( const glm::mat4& proj, const glm::mat4& view, 
 	return glm::vec3( direction );
 }
 
-void DrawCross( const glm::vec3& pos )
+void DrawCross( const glm::vec3& pos, const float& scale = 1.0f )
 {
 	using adm::Vec3;
 
 	// This is kinda elegant I think :3c
 	Vec3 position = &pos.x;
 
-	SDL_SetRenderDrawColor( renderer, 128, 255, 0, 255 );
-	DrawLine3D( position + Vec3::Up * 0.25f, position - Vec3::Up * 0.25f );
-	DrawLine3D( position + Vec3::Right * 0.25f, position - Vec3::Right * 0.25f );
-	DrawLine3D( position + Vec3::Forward * 0.25f, position - Vec3::Forward * 0.25f );
+	DrawLine3D( position + Vec3::Up * 0.25f * scale, position - Vec3::Up * 0.25f * scale );
+	DrawLine3D( position + Vec3::Right * 0.25f * scale, position - Vec3::Right * 0.25f * scale );
+	DrawLine3D( position + Vec3::Forward * 0.25f * scale, position - Vec3::Forward * 0.25f * scale );
 }
 
 void SetupMatrices()
@@ -411,6 +467,74 @@ void TestPolygonIntersection( const float& time )
 		// Orange for the final polygons
 		SDL_SetRenderDrawColor( renderer, 255, 192, 64, 255 );
 		DrawPolygon( polygons[i], true );
+	}
+}
+
+namespace CollisionModel
+{
+	std::vector<Triangle> Triangles;
+
+	glm::vec3 ToGlmVec( const adm::Vec3& v )
+	{
+		return { v.x, v.y, v.z };
+	}
+
+	void BuildCollisionModel( const std::vector<adm::Polygon>& surfaces )
+	{
+		for ( const auto& p : surfaces )
+		{
+			Triangle t;
+
+			for ( int i = 2; i < p.vertices.size(); i++ )
+			{
+				t.verts[0] = ToGlmVec( p.vertices[0] );
+				t.verts[1] = ToGlmVec( p.vertices[i-1] );
+				t.verts[2] = ToGlmVec( p.vertices[i] );
+			}
+
+			Triangles.push_back( t );
+		}
+	}
+
+	void DrawCollisionModel()
+	{
+		SDL_SetRenderDrawColor( renderer, 255, 192, 64, 255 );
+		for ( const auto& t : Triangles )
+		{
+			t.Draw();
+		}
+	}
+
+	// Brute-force raycast, no acceleration structures
+	RayCastResult RayCast( const glm::vec3& point, const glm::vec3& direction )
+	{
+		const float MaxDistance = 100000000.0f;
+		float lastDistance = MaxDistance;
+		RayCastData finalData;
+
+		for ( const auto& t : Triangles )
+		{
+			auto result = t.IntersectsRay( point, direction );
+			if ( !result )
+			{
+				continue;
+			}
+
+			if ( result->distance > lastDistance )
+			{
+				continue;
+			}
+
+			lastDistance = result->distance;
+			finalData = result.value();
+		}
+
+		if ( lastDistance == MaxDistance )
+		{
+			return {};
+		}
+
+		return finalData;
 	}
 }
 
@@ -754,6 +878,8 @@ namespace Map
 	}
 }
 
+std::vector<glm::vec3> Crosses;
+
 void RunFrame( const float& deltaTime, const UserCommands& uc )
 {
 	static float time = 0.0f;
@@ -793,6 +919,8 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		DrawPolygon( p );
 	}
 
+	//CollisionModel::DrawCollisionModel();
+
 	// Crosshair
 	//if ( false )
 	{
@@ -806,12 +934,25 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 			const glm::vec2 screen{ uc.windowMouseX, uc.windowMouseY };
 			const glm::vec2 viewport{ windowWidth, windowHeight };
 			const glm::vec3 screenToWorld = ScreenToWorldDirection( projMatrix, viewMatrix, screen, viewport );
-			const glm::vec3 pos = viewOrigin + screenToWorld * 10.0f;
 
-			DrawCross( pos );
+			auto result = CollisionModel::RayCast( viewOrigin, screenToWorld );
+			if ( !result )
+			{
+				const glm::vec3 pos = viewOrigin + screenToWorld * 10.0f;
 
-			// Also attract the main crosshair
-			crosshairOrigin += (pos - crosshairOrigin) * deltaTime * 20.0f;
+				SDL_SetRenderDrawColor( renderer, 255, 192, 128, 255 );
+				DrawCross( pos );
+
+				// Also attract the main crosshair
+				crosshairOrigin += (pos - crosshairOrigin) * deltaTime * 20.0f;
+			}
+			else
+			{
+				const glm::vec3 pos = result->endPoint;
+				crosshairOrigin += (pos - crosshairOrigin) * deltaTime;
+
+				Crosses.push_back( pos );
+			}
 		}
 		else
 		{
@@ -821,10 +962,16 @@ void RunFrame( const float& deltaTime, const UserCommands& uc )
 		// This is kinda elegant I think :3c
 		Vec3 crosshair = &crosshairOrigin.x;
 
-		SDL_SetRenderDrawColor( renderer, 128, 255, 0, 255 );
-		DrawLine3D( crosshair + Vec3::Up * 0.25f, crosshair - Vec3::Up * 0.25f );
-		DrawLine3D( crosshair + Vec3::Right * 0.25f, crosshair - Vec3::Right * 0.25f );
-		DrawLine3D( crosshair + Vec3::Forward * 0.25f, crosshair - Vec3::Forward * 0.25f );
+		//SDL_SetRenderDrawColor( renderer, 128, 255, 0, 255 );
+		//DrawLine3D( crosshair + Vec3::Up * 0.25f, crosshair - Vec3::Up * 0.25f );
+		//DrawLine3D( crosshair + Vec3::Right * 0.25f, crosshair - Vec3::Right * 0.25f );
+		//DrawLine3D( crosshair + Vec3::Forward * 0.25f, crosshair - Vec3::Forward * 0.25f );
+
+		SDL_SetRenderDrawColor( renderer, 255, 0, 0, 255 );
+		for ( const auto& c : Crosses )
+		{
+			DrawCross( c, 2.0f );
+		}
 	}
 
 	// View gizmos
@@ -865,6 +1012,7 @@ int main( int argc, char** argv )
 	SDL_SetRelativeMouseMode( SDL_FALSE );
 
 	Map::Load();
+	CollisionModel::BuildCollisionModel( Map::Polygons );
 
 	float deltaTime = 0.016f;
 	while ( true )
